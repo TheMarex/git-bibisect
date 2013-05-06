@@ -17,6 +17,8 @@
 #
 
 import subprocess
+import configparser
+import optparse
 import shutil
 import os
 import sys
@@ -48,11 +50,11 @@ class BuildJob:
         ret = subprocess.call(self._cmds['build'].split(" "))
         return (ret == 0)
 
-    def run(self):
-        if 'run' not in self._cmds:
+    def execute(self):
+        if 'execute' not in self._cmds:
             return True
 
-        ret = subprocess.call(self._cmds['run'].split(" "))
+        ret = subprocess.call(self._cmds['execute'], shell=True)
         return (ret == 0)
 
     def commit(self):
@@ -72,7 +74,7 @@ class BuildJob:
         if ret > 0:
             print("Error: Could not commit %s" % self._rev)
 
-def get_head():
+def _get_head():
     head = ""
     try:
         cmd = "git symbolic-ref HEAD"
@@ -84,66 +86,94 @@ def get_head():
         head = tmp.split(" ")[0]
     return head
 
-def is_dirty():
+def _is_dirty():
     cmd = "git status --porcelain"
     tmp = subprocess.check_output(cmd.split(" ")).decode(sys.stdout.encoding).strip()
-    print(tmp)
     return (tmp != "")
 
-def build(revs, files, cmds, dest):
+def _parse_revs(revRange):
+    cmd = "git rev-list --reverse %s" % revRange
+    revs = subprocess.check_output(cmd.split(" ")).split(b"\n")
+    revs = [r.decode(sys.stdout.encoding).strip() for r in revs]
+    revs = [r for r in revs if len(r)]
+    return revs
+
+def add(rev, files, cmds, dest):
     # backup head
-    head = get_head()
+    head = _get_head()
 
-    os.makedirs(dest)
-    call_in("git init -q .", dest)
-
-    for r in revs:
-        j = BuildJob(dest, r, files, cmds)
-        j.checkout()
-        if j.configure() and j.build():
-            if not j.run():
-                print("Error: Could not run!")
-            j.commit()
+    j = BuildJob(dest, rev, files, cmds)
+    j.checkout()
+    if j.configure() and j.build():
+        if not j.execute():
+            print("Warning: Could not execute!")
+        j.commit()
 
     # restore head
     cmd = "git checkout -q %s" % head
     subprocess.call(cmd.split(" "))
 
+def build(revs, files, cmds, dest):
+    if os.path.exists(output):
+        print("Error: Output directory exists.")
+        return
+    os.makedirs(dest)
+    call_in("git init -q .", dest)
+
+    for r in revs:
+        add(r, files, cmds, dest)
 
 if __name__ == '__main__':
-    if is_dirty():
+    if _is_dirty():
         print("Warning: You should not run this on a dirty working tree.")
 
-    # git bibisect --range HEAD^^..HEAD file1 file2 ... dest-dir
-    n = len(sys.argv) - 1
-    args = sys.argv[1:]
-    s = 0
+    config = configparser.ConfigParser()
+    config.read([".gitbuild", "../.gitbuild"])
 
-    if n == 0:
-        print("Error: No destination given.")
+    files = []
+    output = "binaries"
+
+    if "bibisect" in config:
+        if "files" in config["bibisect"]:
+            files = [f.strip() for f in config["bibisect"]["files"].split(",")]
+        if "output" in config["bibisect"]:
+            output = config["bibisect"]["output"]
+
+    if "build" in config:
+        cmds = config["build"]
+    else:
+        print("Error: No build parameters given.")
         sys.exit(1)
 
-    cmd = "git rev-list HEAD"
-    if n >= 2 and args[0] == "--range":
-        cmd = "git rev-list --reverse %s" % args[1]
-        # first 2 entries parsed
-        s += 2
-    revs = subprocess.check_output(cmd.split(" ")).split(b"\n")
-    revs = [r.decode(sys.stdout.encoding) for r in revs if r != '']
+    parser = optparse.OptionParser("Usage: %prog [options] file1 file2 ...")
+    parser.add_option("-o", "--output", dest="output", help="destination directory of the git repo")
+    parser.add_option("-r", "--range", dest="revRange", default="HEAD", help="only build commits in this range")
+    parser.add_option("-c", "--configure", dest="configure", help="command to use for configuration (e.g. cmake ..)")
+    parser.add_option("-b", "--build", dest="build", help="command to use for building (e.g. make -j2)")
+    parser.add_option("-x", "--execute", dest="execute", help="command to run after the build is finished")
 
-    if s >= n:
-        print("Error: No destination given.")
+    options, args = parser.parse_args()
+
+    files = args or files
+    files = [os.path.abspath(f) for f in files]
+    output = options.output or output
+    output = os.path.abspath(output)
+    if options.configure:
+        cmds['configure'] = options.configure
+    if options.build:
+        cmds['build'] = options.build
+    if options.execute:
+        cmds['execute'] = options.execute
+
+    if len(files) == 0:
+        print("Error: No files given.")
         sys.exit(1)
 
-    files = args[s:n-1]
-    s += len(files)
+    revs = _parse_revs(options.revRange)
 
-    if s >= n:
-        print("Error: No destination given.")
-        sys.exit(1)
+    print("Building the following revisions:")
+    for r in revs:
+        print(r)
 
-    dest = args[n-1]
-
-    cmds = {'build': "make -j2", 'configure': "cmake .. -DCMAKE_BUILD_TYPE=Release"}
-    build(revs, files, cmds, dest)
+    build(revs, files, cmds, output)
 
