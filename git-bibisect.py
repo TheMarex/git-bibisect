@@ -22,6 +22,7 @@ import optparse
 import shutil
 import os
 import sys
+import re
 
 def _call_in(cmd, directory, output=False):
     d = os.getcwd()
@@ -97,11 +98,20 @@ def _is_dirty():
     tmp = subprocess.check_output(cmd.split(" ")).decode(sys.stdout.encoding).strip()
     return (tmp != "")
 
-def _parse_revs(revRange):
+def _check_msg(rev, exp):
+    cmd = "git log -n 1 --format=%%B %s" % rev
+    tmp = subprocess.check_output(cmd.split(" ")).decode(sys.stdout.encoding)
+
+    pat = re.compile(exp)
+    return pat.search(tmp) != None
+
+def _parse_revs(revRange, exp):
     cmd = "git rev-list --reverse %s" % revRange
     revs = subprocess.check_output(cmd.split(" ")).split(b"\n")
     revs = [r.decode(sys.stdout.encoding).strip() for r in revs]
     revs = [r for r in revs if len(r)]
+    if exp:
+        revs = [r for r in revs if _check_msg(r, exp)]
     return revs
 
 def _rev_exists(rev, repo):
@@ -166,6 +176,7 @@ if __name__ == '__main__':
     parser.add_option("-c", "--configure", dest="configure", help="command to use for configuration (e.g. cmake ..)")
     parser.add_option("-b", "--build", dest="build", help="command to use for building (e.g. make -j2)")
     parser.add_option("-x", "--execute", dest="execute", help="command to run after the build is finished")
+    parser.add_option("-f", "--filter", dest="filter", help="only build revisions with a commit message that contains this string")
 
     options, args = parser.parse_args()
 
@@ -189,7 +200,7 @@ if __name__ == '__main__':
         print("Error: No files given.")
         sys.exit(1)
 
-    revs = _parse_revs(options.revRange)
+    revs = _parse_revs(options.revRange, options.filter)
 
     print("Building %i revisions." % len(revs))
 
