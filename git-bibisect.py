@@ -23,10 +23,16 @@ import shutil
 import os
 import sys
 
-def call_in(cmd, directory):
+def _call_in(cmd, directory, output=False):
     d = os.getcwd()
     os.chdir(directory)
-    ret = subprocess.call(cmd.split(" "))
+    if output:
+        try:
+            ret = subprocess.check_output(cmd.split(" ")).decode(sys.stdout.encoding)
+        except subprocess.CalledProcessError:
+            ret = ""
+    else:
+        ret = subprocess.call(cmd.split(" "))
     os.chdir(d)
     return ret
 
@@ -65,12 +71,12 @@ class BuildJob:
             shutil.move(p, dest)
 
             cmd = "git add %s" % name
-            ret = call_in(cmd, self._dest)
+            ret = _call_in(cmd, self._dest)
             if ret > 0:
                 print("Error: Could not add %s" % dest)
 
         cmd = "git commit -q -m build_%s" % self._rev
-        ret = call_in(cmd, self._dest)
+        ret = _call_in(cmd, self._dest)
         if ret > 0:
             print("Error: Could not commit %s" % self._rev)
 
@@ -98,30 +104,39 @@ def _parse_revs(revRange):
     revs = [r for r in revs if len(r)]
     return revs
 
-def add(rev, files, cmds, dest):
-    # backup head
-    head = _get_head()
+def _rev_exists(rev, repo):
+    cmd = "git log"
+    log = _call_in(cmd, repo, output=True)
+    return ("build_%s" % rev) in log
 
-    j = BuildJob(dest, rev, files, cmds)
-    j.checkout()
-    if j.configure() and j.build():
-        if not j.execute():
-            print("Warning: Could not execute!")
-        j.commit()
+def add(revs, files, cmds, dest):
+    for r in revs:
+        if _rev_exists(r, dest):
+            print("Warning: Revision %s already in repository. Skipping." % r)
+            continue
 
-    # restore head
-    cmd = "git checkout -q %s" % head
-    subprocess.call(cmd.split(" "))
+        # backup head
+        head = _get_head()
 
-def build(revs, files, cmds, dest):
+        j = BuildJob(dest, r, files, cmds)
+        j.checkout()
+        if j.configure() and j.build():
+            if not j.execute():
+                print("Warning: Could not execute!")
+            j.commit()
+
+        # restore head
+        cmd = "git checkout -q %s" % head
+        subprocess.call(cmd.split(" "))
+
+def init(dest):
     if os.path.exists(output):
         print("Error: Output directory exists.")
-        return
-    os.makedirs(dest)
-    call_in("git init -q .", dest)
+        return False
 
-    for r in revs:
-        add(r, files, cmds, dest)
+    os.makedirs(dest)
+    _call_in("git init -q .", dest)
+    return True
 
 if __name__ == '__main__':
     if _is_dirty():
@@ -145,7 +160,7 @@ if __name__ == '__main__':
         print("Error: No build parameters given.")
         sys.exit(1)
 
-    parser = optparse.OptionParser("Usage: %prog [options] file1 file2 ...")
+    parser = optparse.OptionParser("Usage: %prog [options] [add | build] file1 file2 ...")
     parser.add_option("-o", "--output", dest="output", help="destination directory of the git repo")
     parser.add_option("-r", "--range", dest="revRange", default="HEAD", help="only build commits in this range")
     parser.add_option("-c", "--configure", dest="configure", help="command to use for configuration (e.g. cmake ..)")
@@ -154,7 +169,12 @@ if __name__ == '__main__':
 
     options, args = parser.parse_args()
 
-    files = args or files
+    if len(args) == 0 or args[0] not in ("build", "add"):
+        print("Error: No command given.")
+        sys.exit(1)
+
+    command = args[0]
+    files = args[1:] or files
     files = [os.path.abspath(f) for f in files]
     output = options.output or output
     output = os.path.abspath(output)
@@ -171,9 +191,11 @@ if __name__ == '__main__':
 
     revs = _parse_revs(options.revRange)
 
-    print("Building the following revisions:")
-    for r in revs:
-        print(r)
+    print("Building %i revisions." % len(revs))
 
-    build(revs, files, cmds, output)
+    if command == "build":
+        if not init(output):
+            sys.exit(1)
+    add(revs, files, cmds, output)
+
 
